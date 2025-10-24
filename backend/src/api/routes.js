@@ -1,7 +1,9 @@
 const express = require("express");
 const { v4: uuidv4 } = require("uuid");
-const store = require("../storage/inMemoryStore");
-const { scheduleTask } = require("../core/workerQueue");
+const { Parser } = require("json2csv"); 
+const { scheduleTask, deleteTask: deleteTaskFromQueue } = require("../core/workerQueue");
+// const store = require("../storage/inMemoryStore");
+const store = require("../storage/sqliteStore");
 
 const router = express.Router();
 let io = null; // will be set from main.js
@@ -27,63 +29,128 @@ function parseDelayMs(body) {
 
 function setSocket(socketInstance) {
   io = socketInstance;
+  // also set it in workerQueue for consistent updates
+  const { setSocket: setWorkerSocket } = require("../core/workerQueue");
+  setWorkerSocket(io);
 }
 
 // Endpoint to create a new task
-router.post("/tasks", (req, res) => {
+router.post("/tasks", async (req, res) => {
   const { name } = req.body;
   const delayMs = parseDelayMs(req.body);
   const now = new Date();
-  const createdAt = now;
-  const scheduledFor = new Date(now.getTime() + delayMs);
 
-  // Always create with current timestamp
   const task = {
     id: uuidv4(),
     name,
     status: "pending",
-    createdAt: createdAt.toISOString(), // when task was added
-    scheduledFor: scheduledFor.toISOString(), // execution time
+    createdAt: now.toISOString(),
+    scheduledFor: new Date(now.getTime() + delayMs).toISOString(),
+    retryCount: 0,
+    maxRetries: req.body.maxRetries ?? 3,
+    retryDelay: req.body.retryDelay ?? 1000,
+    priority: req.body.priority ?? 5,
+    recurringInterval: req.body.recurringInterval ?? null,
   };
 
-  store.addTask(task);
-  console.log("Task added:", task);
+  await store.addTask(task);
 
-  // Pass task to worker
-  console.log("io in routes:", io);
+  // Schedule task in worker queue
+  const { scheduleTask } = require("../core/workerQueue");
+  scheduleTask(task, delayMs);
+
+  // Emit to frontend
   if (io) {
     io.emit("task:added", task);
-    console.log("Emitted task:added for", task.id);
+    await require("../core/workerQueue").emitMetrics();
   }
-  
-  console.log("Task scheduled with delay:", delayMs);
-  scheduleTask(task, delayMs);
 
   res.status(201).json(task);
 });
 
 //Get all tasks
-router.get("/tasks", (req, res) => {
-  res.json(store.getAllTasks());
+router.get("/tasks", async (req, res) => {
+  const tasks = await store.getAllTasks();
+  res.json(tasks);
   // console.log(store); // should show { addTask: [Function], getTask: [Function], getAllTasks: [Function], ... }
 });
 
 //Get single task by id
-router.get("/tasks/:id", (req, res) => {
-  const task = store.getTask(req.params.id);
+router.get("/tasks/:id", async (req, res) => {
+  const task = await store.getTask(req.params.id);
   if (!task) return res.status(404).json({ error: "Task not found" });
   res.json(task);
 });
 
-//Delete task by id
-router.delete("/tasks/:id", (req, res) => {
-  const deleted = store.deleteTask(req.params.id);
-  if (!deleted) return res.status(404).json({ error: "Task not found" });
+// Delete task by id (support recurring)
+router.delete("/tasks/:id", async (req, res) => {
+  const { recurring } = req.query; // <-- read query param
+  const taskId = req.params.id;
 
-  if (io) io.emit("task:deleted", { id: req.params.id });
+  try {
+    // Use workerQueue delete so recurring flags and timeouts are cleared
+    await deleteTaskFromQueue(taskId, recurring === "true");
 
-  res.status(204).send();
-  res.json({ message: "Task deleted successfully" });
+    res.json({ message: "Task deleted successfully" });
+  } catch (err) {
+    console.error("Delete task error:", err);
+    res.status(500).json({ error: "Failed to delete task" });
+  }
+});
+
+
+router.get("/metrics", async (req, res) => {
+  try {
+    const tasks = await store.getAllTasks();
+
+    const metrics = {
+      total: tasks.length,
+      pending: tasks.filter((t) => t.status === "pending").length,
+      running: tasks.filter((t) => t.status === "running").length,
+      completed: tasks.filter((t) => t.status === "completed").length,
+      failed: tasks.filter((t) => t.status === "failed").length,
+      retrying: tasks.filter((t) => t.status === "retrying").length,
+    };
+    res.json(metrics);
+  } catch (err) {
+    console.error("Error fetching metrics:", err);
+    res.status(500).json({ error: "Failed to fetch metrics-Internal server error" });
+  }
+});
+
+router.get("/metrics/export", async (req, res) => {
+  try {
+    const format = (req.query.format || "json").toLowerCase();
+    const tasks = await store.getAllTasks();
+
+    if (format === "csv") {
+      const fields = [
+        "id",
+        "name",
+        "status",
+        "createdAt",
+        "scheduledFor",
+        "startedAt",
+        "completedAt",
+        "retryCount",
+        "maxRetries",
+        "retryDelay",
+        "priority",
+        "recurringInterval",
+      ];
+      const parser = new Parser({ fields });
+      const csv = parser.parse(tasks);
+      res.header("Content-Type", "text/csv");
+      res.attachment("tasks.csv");
+      return res.send(csv);
+    }
+
+    // default JSON
+    res.json(tasks);
+  } catch (err) {
+    console.error("Error exporting metrics:", err);
+    res.status(500).json({ error: "Failed to export metrics" });
+  }
 });
 
 module.exports = router;

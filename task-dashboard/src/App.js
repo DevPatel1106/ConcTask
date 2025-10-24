@@ -1,41 +1,129 @@
 import React, { useState, useEffect } from "react";
+import "./App.css";
 
 import TaskTable from "./components/TaskTable";
-import AddTaskForm from "./components/TaskForm";
-
-import { getTasks, addTask, socket } from "./api";
-// import socket from "./socket";
 import MetricsPanel from "./components/MetricsPanel";
+import MetricsChart from "./components/MetricsChart";
+import ThroughputChart from "./components/ThroughputChart";
+
+import {
+  getTasks,
+  addTask,
+  socket,
+  getMetrics,
+  deleteTask,
+  exportTasks,
+} from "./api";
+
+import {
+  Grid,
+  Card,
+  CardContent,
+  Typography,
+  Box,
+  Button,
+  TextField,
+} from "@mui/material";
 
 function App() {
   const [tasks, setTasks] = useState([]);
   const [taskName, setTaskName] = useState("");
   const [delay, setDelay] = useState(5);
+  const [metrics, setMetrics] = useState({
+    total: 0,
+    pending: 0,
+    running: 0,
+    completed: 0,
+    failed: 0,
+    retrying: 0,
+  });
+  const [priority, setPriority] = useState(5);
+  const [maxRetries, setMaxRetries] = useState(3);
+  const [retryDelay, setRetryDelay] = useState(1000);
+  const [recurringInterval, setRecurringInterval] = useState(0);
+
+  const computeMetrics = (tasks) => {
+    const validTasks = tasks.filter((t) => t != null);
+    return {
+      total: validTasks.length,
+      pending: validTasks.filter((t) => t.status === "pending").length,
+      running: validTasks.filter((t) => t.status === "running").length,
+      completed: validTasks.filter((t) => t.status === "completed").length,
+      failed: validTasks.filter((t) => t.status === "failed").length,
+      retrying: validTasks.filter((t) => t.status === "retrying").length,
+    };
+  };
+
+  const updateTasks = (newTasks) => {
+    const tasksArray = Array.isArray(newTasks) ? newTasks : [newTasks];
+    setTasks(tasksArray);
+    setMetrics(computeMetrics(tasksArray));
+  };
 
   useEffect(() => {
-    async function fetchTasks() {
+    async function fetchTasksAndMetrics() {
       try {
         const data = await getTasks();
-        setTasks(data);
+        updateTasks(data);
+        const metricsData = await getMetrics();
+        setMetrics(metricsData);
       } catch (error) {
-        console.error("Error fetching tasks:", error);
+        console.error("Error fetching tasks/metrics:", error);
       }
     }
 
-    fetchTasks();
-    // WebSocket listeners
+    fetchTasksAndMetrics();
+
+    // --- WebSocket listeners ---
     socket.on("task:added", (newTask) => {
-      setTasks((prev) => [...prev, newTask]);
+      if (!newTask) return;
+      setTasks((prev) => {
+        const updated = prev.some((t) => t?.id === newTask.id)
+          ? prev
+          : [...prev, newTask];
+        setMetrics(computeMetrics(updated));
+        return updated;
+      });
     });
+
     socket.on("task:updated", (updatedTask) => {
-      setTasks((prev) =>
-        prev.map((t) => (t.id === updatedTask.id ? updatedTask : t))
-      );
+      if (!updatedTask) return;
+      setTasks((prev) => {
+        const updatedTasks = prev
+          .filter((t) => t != null)
+          .map((t) => (t.id === updatedTask.id ? updatedTask : t));
+        setMetrics(computeMetrics(updatedTasks));
+        return updatedTasks;
+      });
+    });
+
+    socket.on("task:deleted", (data) => {
+      const { id, recurring } = data || {};
+      if (!id) return;
+
+      setTasks((prevTasks) => {
+        let updatedTasks;
+        if (recurring) {
+          updatedTasks = prevTasks.filter(
+            (t) => t.id !== id && t.recurringId !== id
+          );
+        } else {
+          updatedTasks = prevTasks.filter((t) => t.id !== id);
+        }
+        setMetrics(computeMetrics(updatedTasks));
+        return updatedTasks;
+      });
+    });
+
+    socket.on("metrics:update", (metricsData) => {
+      setMetrics(metricsData);
     });
 
     return () => {
       socket.off("task:added");
       socket.off("task:updated");
+      socket.off("task:deleted");
+      socket.off("metrics:update");
     };
   }, []);
 
@@ -43,122 +131,169 @@ function App() {
     e.preventDefault();
     if (!taskName) return alert("Task name is required");
     try {
-      await addTask({ name: taskName, delaySeconds: delay });
+      await addTask({
+        name: taskName,
+        delaySeconds: delay,
+        priority,
+        maxRetries,
+        retryDelay,
+        recurringInterval: recurringInterval > 0 ? recurringInterval : null,
+      });
       setTaskName("");
     } catch (err) {
       console.error("Failed to add task:", err);
     }
   };
 
-return (
-    <div className="container">
-      <h1>Task Scheduler Dashboard</h1>
+  const handleDeleteTask = async (task) => {
+    const deleteRecurring = task.recurringInterval > 0;
+    try {
+      await deleteTask(task.id, deleteRecurring);
+    } catch (err) {
+      console.error("Failed to delete task:", err);
+    }
+  };
 
-      {/* Task creation form */}
-      <form onSubmit={handleSubmit}>
-        <input
-          type="text"
-          placeholder="Task Name"
-          value={taskName}
-          onChange={(e) => setTaskName(e.target.value)}
-        />
-        <input
-          type="number"
-          placeholder="Delay (seconds)"
-          value={delay}
-          onChange={(e) => setDelay(e.target.value)}
-        />
-        <button type="submit">Add Task</button>
-      </form>
+  const handleExport = async (format) => {
+    try {
+      const res = await exportTasks(format);
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `tasks.${format}`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      console.error("Export failed:", err);
+    }
+  };
 
-      {/* Metrics panel */}
-      <MetricsPanel tasks={tasks} />
+  return (
+    <Box sx={{ p: 3, bgcolor: "#e6edffff", minHeight: "100vh" }}>
+      <Typography variant="h4" align="center" gutterBottom>
+        Task Scheduler Dashboard
+      </Typography>
 
-      {/* Task table */}
-      <TaskTable tasks={tasks} />
-    </div>
+      {/* --- Add Task Form --- */}
+      <Card sx={{ mb: 3, p: 2 }}>
+        <Typography variant="h6" gutterBottom>
+          Add New Task
+        </Typography>
+        <Box
+          component="form"
+          onSubmit={handleSubmit}
+          sx={{
+            display: "grid",
+            gap: 2,
+            gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr 1fr" },
+          }}
+        >
+          <TextField
+            label="Task Name"
+            value={taskName}
+            onChange={(e) => setTaskName(e.target.value)}
+            required
+          />
+          <TextField
+            label="Delay (seconds)"
+            type="number"
+            value={delay}
+            onChange={(e) => setDelay(e.target.value)}
+          />
+          <TextField
+            label="Priority (1-10)"
+            type="number"
+            value={priority}
+            onChange={(e) => setPriority(e.target.value)}
+          />
+          <TextField
+            label="Max Retries"
+            type="number"
+            value={maxRetries}
+            onChange={(e) => setMaxRetries(e.target.value)}
+          />
+          <TextField
+            label="Retry Delay (ms)"
+            type="number"
+            value={retryDelay}
+            onChange={(e) => setRetryDelay(e.target.value)}
+          />
+          <TextField
+            label="Recurring Interval (ms)"
+            type="number"
+            value={recurringInterval}
+            onChange={(e) => setRecurringInterval(e.target.value)}
+          />
+          <Button type="submit" variant="contained" color="primary">
+            Add Task
+          </Button>
+        </Box>
+      </Card>
+
+      {/* --- Metrics, Charts, and Table --- */}
+      <Grid container spacing={2}>
+
+        {/* Task Table */}
+        <Grid item xs={12}>
+          <Card sx={{ overflow: "auto" }}>
+            <CardContent>
+              <TaskTable tasks={tasks} handleDeleteTask={handleDeleteTask} />
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Export Buttons */}
+        <Grid item xs={12} md={12} lg={4}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Export Tasks
+              </Typography>
+              <Box sx={{ display: "flex", gap: 2 }}>
+                <Button variant="outlined" onClick={() => handleExport("json")}>
+                  Export JSON
+                </Button>
+                <Button variant="outlined" onClick={() => handleExport("csv")}>
+                  Export CSV
+                </Button>
+              </Box>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Metrics Chart */}
+        <Grid item xs={12} md={6} lg={4}>
+          <Card>
+            <CardContent>
+              <MetricsChart metrics={metrics} />
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Throughput Chart */}
+        <Grid item xs={12}>
+          <Card>
+            <CardContent>
+              <ThroughputChart tasks={tasks} />
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Metrics Panel */}
+        <Grid item xs={12} md={6} lg={4}>
+          <Card>
+            <CardContent>
+              <MetricsPanel metrics={metrics} />
+            </CardContent>
+          </Card>
+        </Grid>
+
+
+
+      </Grid>
+    </Box>
   );
 }
 
 export default App;
-
-// function App() {
-//   const [tasks, setTasks] = useState([]);
-//   const [name, setName] = useState("");
-//   const [delay, setDelay] = useState(5);
-
-//   // Fetch tasks from backend
-//   const fetchTasks = async () => {
-//     const res = await fetch("http://localhost:5000/api/tasks");
-//     const data = await res.json();
-//     setTasks(data);
-//   };
-
-//   useEffect(() => {
-//     fetchTasks();
-//     const interval = setInterval(fetchTasks, 3000); // auto-refresh every 3s
-//     return () => clearInterval(interval);
-//   }, []);
-
-//   const addTask = async () => {
-//     await fetch("http://localhost:5000/api/tasks", {
-//       method: "POST",
-//       headers: { "Content-Type": "application/json" },
-//       body: JSON.stringify({ name, delay: delay * 1000 })
-//     });
-//     setName("");
-//     setDelay(5);
-//     fetchTasks();
-//   };
-
-//   return (
-//     <div style={{ padding: "20px", fontFamily: "Arial" }}>
-//       <h1>Task Scheduler Dashboard</h1>
-
-//       <div style={{ marginBottom: "20px" }}>
-//         <input
-//           type="text"
-//           placeholder="Enter task name"
-//           value={name}
-//           onChange={(e) => setName(e.target.value)}
-//         />
-//         <input
-//           type="number"
-//           value={delay}
-//           onChange={(e) => setDelay(Number(e.target.value))}
-//           style={{ marginLeft: "10px" }}
-//         />
-//         <button onClick={addTask} style={{ marginLeft: "10px" }}>
-//           Add Task
-//         </button>
-//       </div>
-
-//       <ul>
-//         {tasks.map((task) => (
-//           <li key={task.id} style={{ marginBottom: "10px" }}>
-//             <b>{task.name}</b> —
-//             Created At: {new Date(task.createdAt).toLocaleString()} —
-//             Scheduled For: {task.scheduledFor ? new Date(task.scheduledFor).toLocaleString() : "N/A"} —
-//             <span
-//               style={{
-//                 fontWeight: "bold",
-//                 color:
-//                   task.status === "completed"
-//                     ? "green"
-//                     : task.status === "running"
-//                     ? "blue"
-//                     : task.status === "failed"
-//                     ? "red"
-//                     : "orange"
-//               }}
-//             >
-//               {task.status}
-//             </span>
-//           </li>
-//         ))}
-//       </ul>
-//     </div>
-//   );
-// }
-
-// export default App;

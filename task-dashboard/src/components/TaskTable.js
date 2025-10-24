@@ -1,6 +1,8 @@
 import React from "react";
+import axios from "axios";
+import { useState } from "react";
 
-function TaskTable({ tasks }) {
+function TaskTable({ tasks, setTasks, handleDeleteTask }) {
   const statusColor = (status) => {
     switch (status) {
       case "pending":
@@ -16,6 +18,7 @@ function TaskTable({ tasks }) {
     }
   };
 
+
   return (
     <table border="1" cellPadding="8" cellSpacing="0" style={{ width: "100%" }}>
       <thead>
@@ -26,17 +29,29 @@ function TaskTable({ tasks }) {
           <th>Status</th>
           <th>Started At</th>
           <th>Completed At</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
         {tasks.map((task) => (
-          <tr key={task.id} style={{ backgroundColor: statusColor(task.status) }}>
+          <tr
+            key={task.id}
+            style={{ backgroundColor: statusColor(task.status) }}
+          >
             <td>{task.name}</td>
             <td>{new Date(task.createdAt).toLocaleString()}</td>
             <td>{new Date(task.scheduledFor).toLocaleString()}</td>
             <td>{task.status}</td>
-            <td>{task.startedAt ? new Date(task.startedAt).toLocaleString() : "-"}</td>
-            <td>{task.completedAt ? new Date(task.completedAt).toLocaleString() : "-"}</td>
+            <td>
+              {task.startedAt ? new Date(task.startedAt).toLocaleString() : "-"}
+            </td>
+            <td>
+              {task.completedAt
+                ? new Date(task.completedAt).toLocaleString()
+                : "-"}
+            </td>
+            <button onClick={() => handleDeleteTask(task)}>Delete</button>
+
           </tr>
         ))}
       </tbody>
