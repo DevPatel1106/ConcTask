@@ -127,3 +127,10 @@ npm test       # Run tests
 ```
 
 For more advanced configuration, refer to the CRA Documentation.
+
+---
+
+## Sample Images
+<img width="1893" height="774" alt="image" src="https://github.com/user-attachments/assets/15556d63-9789-4859-b7c1-a1c5291beb39" />
+<img width="1358" height="671" alt="image" src="https://github.com/user-attachments/assets/04964b6b-267b-44fa-84b1-b9887160a585" />
+
